@@ -4,18 +4,6 @@ A real-time transaction risk engine. Simulated transactions flow through Kafka, 
 
 Stack: Python, Kafka, PostgreSQL, FastAPI, Airflow, Docker Compose, pytest (rules written test-first).
 
-## Status
-
-| Part | State |
-|---|---|
-| Kafka producer (simulated transactions) and consumer | Built |
-| Three scoring rules, written test-first | Built |
-| Postgres storage, alerts, risk profiles | Built |
-| FastAPI endpoints with JWT auth | Built |
-| Nightly Airflow DAG (review alerts, risk profiles, report) | Built, verified on schedule |
-| Producer, consumer, API, Kafka, Postgres and Airflow in Docker Compose | Built, verified from a fresh clone |
-| Latency measurement | Built (SQL query, results below) |
-| Kubernetes manifests (consumer, API, Service, Secret placeholders) | Written, not deployed |
 
 ## Architecture
 
