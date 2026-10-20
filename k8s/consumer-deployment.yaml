@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentinel-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sentinel-consumer
+  template:
+    metadata:
+      labels:
+        app: sentinel-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: sentinel-app
+          command: ["python", "-m", "consumer.consume"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "sentinel-kafka:9092"
+            - name: POSTGRES_HOST
+              value: "postgres"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: postgres-user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sentinel-secrets
+                  key: postgres-password
+            - name: POSTGRES_DB
+              value: "sentinel"

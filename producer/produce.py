@@ -3,10 +3,11 @@ import json
 import random
 import time
 import uuid
+import os
 from datetime import datetime,timezone
 
 producer = KafkaProducer(
-    bootstrap_servers='localhost:9092',
+    bootstrap_servers=os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092'),
     key_serializer=lambda k: str(k).encode('utf-8'),
     value_serializer=lambda v: json.dumps(v).encode('utf-8')
 )

@@ -81,3 +81,9 @@ def is_velocity_anomalous(curr_timestamp, past_timestamps, window_seconds=60, ma
             count += 1
 
     return count > max_txns
+
+
+def should_flag_geo(trusted, previous, current):
+    if trusted is None or previous is None:
+        return False                      # no history yet: nothing to compare with
+    return is_geo_impossible(trusted, current) and is_geo_impossible(previous, current)

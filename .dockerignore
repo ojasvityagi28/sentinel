@@ -1,0 +1,12 @@
+venv/
+.git/
+.env
+.env.*
+__pycache__/
+*.pyc
+reports/
+.pytest_cache/
+.coverage
+airflow/
+jobs/
+tests/
