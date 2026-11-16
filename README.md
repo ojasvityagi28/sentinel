@@ -4,6 +4,18 @@ A real-time transaction risk engine. Simulated transactions flow through Kafka, 
 
 Stack: Python, Kafka, PostgreSQL, FastAPI, Airflow, Docker Compose, pytest (rules written test-first).
 
+## Status
+
+| Part | State |
+|---|---|
+| Kafka producer (simulated transactions) and consumer | Built |
+| Three scoring rules, written test-first | Built |
+| Postgres storage, alerts, risk profiles | Built |
+| FastAPI endpoints with JWT auth | Built |
+| Nightly Airflow DAG (review alerts, risk profiles, report) | Built, verified on schedule |
+| Producer, consumer, API, Kafka, Postgres and Airflow in Docker Compose | Built, verified from a fresh clone |
+| Latency measurement | Built (SQL query, results below) |
+| Kubernetes manifests (consumer, API, Service, Secret placeholders) | Written, not deployed |
 
 ## Architecture
 
@@ -12,8 +24,8 @@ Stack: Python, Kafka, PostgreSQL, FastAPI, Airflow, Docker Compose, pytest (rule
               (keyed by user_id,              │           ├─ transactions
                3 partitions)                  │           ├─ alerts  (status: open / dismissed)
                                               ▼           ├─ risk_profiles
-                                    scoring/ (pure rules) └─ operators
-                                    + per-user in-memory cache
+                                    scoring/ (pure rules) ├─ operators
+                                    + per-user in-memory cache └─ users (registered home city)
 
  Airflow (nightly): review amount alerts ──► compute risk profiles ──► CSV report
                     (reads and writes Postgres)
@@ -22,7 +34,7 @@ Stack: Python, Kafka, PostgreSQL, FastAPI, Airflow, Docker Compose, pytest (rule
 ```
 
 - Messages are keyed by `user_id`, so one user's transactions always land in one partition and are processed in order.
-- For each message the consumer reads the user's history from an in-memory cache (loaded from Postgres on first sight), runs the rules, inserts the transaction, and writes one `alerts` row per rule that fired.
+- For each message the consumer reads the user's history from an in-memory cache (loaded from Postgres on first sight, with the geo baseline seeded from the user's registered home city when there is no history), runs the rules, inserts the transaction, and writes one `alerts` row per rule that fired.
 - Inserts use `ON CONFLICT DO NOTHING` on `transaction_id`, so Kafka's at-least-once redelivery cannot create duplicate rows, duplicate alerts or duplicate cache entries.
 - The producer, consumer and API share one Docker image; each service gets its own start command in `docker-compose.yml`.
 
@@ -32,20 +44,24 @@ Each rule is a plain function with no Kafka or database access, which is what ma
 
 | Rule | Fires when | Parameters |
 |---|---|---|
-| `geo` | The implied travel speed (haversine distance / elapsed time) is implausible compared with **both** the user's last trusted transaction and the immediately previous one | 900 km/h; 5-city coordinate table |
+| `geo` | The implied travel speed (haversine distance / elapsed time) from the user's trusted location is above the limit | 900 km/h; 5-city coordinate table |
 | `amount` | The amount is more than 3 sample standard deviations from the mean of the user's recent amounts, high or low | needs at least 10 past amounts; window of 50 |
 | `velocity` | More than 10 of the user's transactions (current one included) fall in the sliding 60 seconds ending at this one | 60 s window, limit 10 |
 
 Baselines are chosen per rule:
-- `geo` keeps a *trusted* baseline: the last transaction that did not itself fire `geo`. A transaction is flagged only if it is impossible against the trusted baseline **and** against the previous transaction. A single away transaction therefore produces one alert, and the return home is not flagged.
+- `geo` keeps a *trusted* location: the last transaction that did not itself fire `geo`. When a user has none yet, it starts from their registered home city (`users` table), timed at their first transaction. Every away transaction is flagged, including several in a row, and the return home is not.
 - `amount` keeps flagged amounts out of its baseline, so one spike does not inflate the standard deviation for later comparisons.
 - `velocity` counts every transaction, flagged or not, since a burst is exactly what it measures.
 
-### A bug found in a fresh clone
+### A bug found in a fresh clone, and two fixes
 
-The first version compared against the trusted baseline only. In a fresh clone, one user's report showed 982 `geo` alerts on 991 transactions. The cause: that user's first-ever transaction was in an away city. With nothing to compare against it was trusted, every later home-city transaction was flagged against it, and a flagged transaction never became the new baseline, so the user never recovered. The fix (`should_flag_geo`, comparing against both the baseline and the previous transaction) was written test-first, starting from a test that reproduces the stuck baseline. `scripts/send_geo_test.py` sends a synthetic user (Delhi, London, London) through the running stack; it should produce exactly one `geo` alert.
+The first version compared against the trusted location only, and trusted a user's first transaction blindly. In a fresh clone, one user's report showed 982 `geo` alerts on 991 transactions: that user's first-ever transaction was in an away city, so it became trusted, every later home-city transaction was flagged against it, and a flagged transaction never became the new baseline.
 
-The trade-off: after one genuinely suspicious away transaction, further activity in the same far-away city is treated as a move and is not flagged again.
+The first fix flagged only if a transaction was impossible against both the trusted location and the previous transaction. That recovered stuck users, but a second away transaction in a row matched the previous one, passed, became trusted, and the real return home was then flagged.
+
+The final fix corrects the starting point instead: `initial_geo_baseline` uses the user's newest transaction without a `geo` alert, or else their registered home city timed at their first transaction, and the rule compares against the trusted location only. Both changes were written test-first; one test replays Mumbai, London, London, Mumbai, Mumbai (seconds apart) and expects flags on the two London transactions only. In a 10-minute end-to-end run (680 transactions, 10 away), all 10 away transactions were flagged and no home-city transaction was.
+
+The producer's idea of where a user lives (`home_city()` in the producer) and the bank's record (`users`) are separate copies, written once with the same values, like an address taken at account opening. The consumer only reads the bank's copy.
 
 ## Nightly Airflow job
 
@@ -69,6 +85,7 @@ The producer gives each user a home city and a typical amount. Most transactions
 - `alerts`: `alert_id`, `transaction_id` (FK), `rule`, `status` (`open` or `dismissed`), `created_at`. One row per rule fired.
 - `risk_profiles`: `user_id` (PK), `transaction_count`, `flagged_transactions`, `updated_at`.
 - `operators`: API users, with bcrypt-hashed passwords.
+- `users`: `user_id` (PK), `home_city`. Each simulated user's registered home city.
 
 ## API
 
@@ -99,7 +116,7 @@ One run each, so treat the improvement as indicative, not precise. p95 rests on 
 
 ## Tests
 
-22 tests cover the rules and the alert-review decision, including opposite cases and boundaries (same city at the same instant, exactly 60 seconds old, identical amount history, too little history to review an alert, the stuck geo baseline). Line coverage of `scoring/` is 100% (72 statements). The consumer, API and Airflow tasks are not covered by automated tests; they were checked by hand, including a full run from a fresh clone, so the coverage figure does not describe the whole project.
+29 tests cover the rules, the geo starting point and the alert-review decision, including opposite cases and boundaries (same city at the same instant, exactly 60 seconds old, identical amount history, too little history to review an alert, a first transaction in an away city, two away transactions in a row). Line coverage of `scoring/` is 100% (78 statements). The consumer, API and Airflow tasks are not covered by automated tests; they were checked by hand, including a full run from a fresh clone, so the coverage figure does not describe the whole project.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -117,6 +134,10 @@ pytest --cov=scoring --cov-report=term-missing
    ```bash
    docker compose up -d --build
    ```
+   A fresh database is created from `db/init.sql`. A database created before the `users` table existed needs the migration once:
+   ```bash
+   docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < migrations/001_users.sql
+   ```
 3. Create an operator for the API:
    ```bash
    docker compose exec api python -m scripts.create_operator
@@ -133,7 +154,7 @@ Services run inside the Compose network: Kafka advertises its internal address, 
 
 ## Known limitations
 
-- The `geo` rule treats lasting activity in a new city as a move after one flag, so it cannot catch repeated fraud from the same far-away location. It also only knows five cities.
+- `geo` is a speed rule only: activity in a far city is flagged until enough real time has passed for the trip to be possible (London to Delhi: about 7.5 hours), then accepted. After the system has been off, a user's trusted location can be hours old, so an away transaction right after the pause can pass. It also only knows five cities.
 - Fixed thresholds are tuned to this simulation. Real systems tune per customer or segment.
 - The z-score estimates spread from a small history. In one run, 4 of 7 `amount` alerts were ordinary amounts just past the cutoff, and amounts are not normally distributed, so a low-side flag can be impossible for users with wide spread. The nightly review recovers some of these, but not all.
 - Re-running the review can dismiss further alerts, because dismissed amounts rejoin other alerts' baselines; the job is safe to repeat but not strictly idempotent.
