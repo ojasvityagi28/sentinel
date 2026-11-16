@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from psycopg2.pool import ThreadedConnectionPool
+ from psycopg2.pool import ThreadedConnectionPool
 from datetime import datetime
 from typing import Optional
 from uuid import UUID

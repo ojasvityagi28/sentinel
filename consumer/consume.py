@@ -3,11 +3,11 @@ import os
 import psycopg2
 from kafka import KafkaConsumer
 from dotenv import load_dotenv
-from scoring.rules import should_flag_geo, is_geo_impossible, is_amount_anomalous, is_velocity_anomalous
+from scoring.rules import should_flag_geo, is_geo_impossible, is_amount_anomalous, is_velocity_anomalous, initial_geo_baseline
 from collections import deque
 from datetime import datetime
 
-CACHE = {}   # user_id -> {"timestamps": deque, "amounts": deque, "geo_baseline": tuple or None}
+CACHE = {}   # user_id -> {"timestamps": deque, "amounts": deque, "geo_baseline": (location, datetime) or None}
 HISTORY_SIZE = 50
 assert HISTORY_SIZE > 10, "HISTORY_SIZE must be larger than MAX_TXNS in is_velocity_anomalous"
 
@@ -63,40 +63,30 @@ def get_amount_history(user_id):
     )
     return [row[0] for row in cur.fetchall()]
 
-def load_user(user_id):
-    rows = get_history(user_id)                 # newest first: (amount, location, timestamp)
+def get_home_city(user_id):
+    cur.execute("SELECT home_city FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+def load_user(user_id, first_txn_time):
+    rows = get_history(user_id)
     timestamps = deque(maxlen=HISTORY_SIZE)
-    for row in reversed(rows):                  # reversed = oldest first, so newest ends up last
+    for row in reversed(rows):
         timestamps.append(row[2])
 
     amounts = deque(maxlen=HISTORY_SIZE)
     for a in reversed(get_amount_history(user_id)):
         amounts.append(a)
-    last = (rows[0][1], rows[0][2]) if rows else None     # newest row: (location, timestamp)
 
     CACHE[user_id] = {
         "timestamps": timestamps,
         "amounts": amounts,
-        "geo_baseline": get_geo_baseline(user_id),
-        "last": last,
+        "geo_baseline": initial_geo_baseline(
+            get_geo_baseline(user_id),      # newest transaction without a geo alert, or None
+            get_home_city(user_id),         # registered home, or None
+            first_txn_time,                 # the time to seed home with
+        )
     }
-
-def score(txn, history,amount_history, geo_baseline):
-    fired = []
-
-    if geo_baseline:                               # rule 1: last transaction not flagged by geo
-        prev = {"location": geo_baseline[0], "timestamp": geo_baseline[1].isoformat()}
-        if is_geo_impossible(prev, txn):
-            fired.append("geo")
-
-    if is_amount_anomalous(txn["amount_cents"], amount_history):
-        fired.append("amount")
-
-    past_timestamps = [row[2].isoformat() for row in history]
-    if is_velocity_anomalous(txn["timestamp"], past_timestamps):
-        fired.append("velocity")
-
-    return fired
 
 def score_cached(txn, entry):
     fired = []
@@ -104,11 +94,8 @@ def score_cached(txn, entry):
     trusted = None
     if entry["geo_baseline"]:
         trusted = {"location": entry["geo_baseline"][0], "timestamp": entry["geo_baseline"][1].isoformat()}
-    previous = None
-    if entry["last"]:
-        previous = {"location": entry["last"][0], "timestamp": entry["last"][1].isoformat()}
 
-    if should_flag_geo(trusted, previous, txn):
+    if should_flag_geo(trusted, txn):
         fired.append("geo")
 
     if is_amount_anomalous(txn["amount_cents"], entry["amounts"]):
@@ -126,7 +113,8 @@ for message in consumer:
 
     user_id = txn["user_id"]
     if user_id not in CACHE:
-        load_user(user_id)             # cold start: runs the three queries once
+        load_user(user_id, datetime.fromisoformat(txn["timestamp"]))            # cold start: runs the three queries once
+
     entry = CACHE[user_id]
     fired = score_cached(txn, entry)
     
@@ -153,7 +141,6 @@ for message in consumer:
         entry["timestamps"].append(txn_time)
         if "amount" not in fired:
             entry["amounts"].append(txn["amount_cents"])
-        entry["last"] = (txn["location"], txn_time)       # always, flagged or not
         if "geo" not in fired:
             entry["geo_baseline"] = (txn["location"], txn_time)
     print(f"user={user_id} partition={message.partition} offset={message.offset} fired={fired}")

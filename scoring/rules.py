@@ -82,8 +82,14 @@ def is_velocity_anomalous(curr_timestamp, past_timestamps, window_seconds=60, ma
 
     return count > max_txns
 
+def should_flag_geo(trusted, current):
+    if trusted is None:
+        return False                      # nothing trusted yet: nothing to compare with
+    return is_geo_impossible(trusted, current)
 
-def should_flag_geo(trusted, previous, current):
-    if trusted is None or previous is None:
-        return False                      # no history yet: nothing to compare with
-    return is_geo_impossible(trusted, current) and is_geo_impossible(previous, current)
+def initial_geo_baseline(db_baseline, home_city, first_txn_time):
+    if db_baseline is not None:
+        return db_baseline                      # where they last were, by a transaction we believed
+    if home_city is not None:
+        return (home_city, first_txn_time)      # registered home, "as of right now"
+    return None                                 # nothing to compare against: geo can't judge yet
